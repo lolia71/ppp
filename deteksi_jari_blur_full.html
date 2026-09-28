@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#111111">
+  <title>Deteksi Jari & Blur Kamera</title>
+
+  <!-- MediaPipe Hands -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #111;
+      color: #fff;
+      font-family: Arial, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+
+    .app {
+      width: 100%;
+      max-width: 700px;
+      text-align: center;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(28px, 7vw, 44px);
+    }
+
+    .subtitle {
+      color: #aaa;
+      margin: 0 0 18px;
+    }
+
+    .camera-box {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      background: #000;
+      border-radius: 18px;
+      overflow: hidden;
+      box-shadow: 0 10px 35px rgba(0,0,0,.4);
+    }
+
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      transform: scaleX(-1);
+      transition: filter .15s ease;
+    }
+
+    video.blurred {
+      filter: blur(28px);
+    }
+
+    .overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+    }
+
+    .blur-label {
+      display: none;
+      background: rgba(0,0,0,.65);
+      padding: 12px 18px;
+      border-radius: 999px;
+      font-weight: bold;
+      font-size: 17px;
+    }
+
+    .blurred + .overlay .blur-label {
+      display: block;
+    }
+
+    #status {
+      min-height: 28px;
+      margin: 16px 0;
+      font-size: 17px;
+      color: #ddd;
+    }
+
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 13px 20px;
+      margin: 5px;
+      background: #fff;
+      color: #111;
+      font-size: 16px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: .5;
+      cursor: not-allowed;
+    }
+
+    .hint {
+      margin-top: 18px;
+      color: #888;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .error {
+      color: #ff8a8a !important;
+    }
+
+    .ok {
+      color: #8cffad !important;
+    }
+  </style>
+</head>
+
+<body>
+  <main class="app">
+    <h1>✋ Deteksi Jari</h1>
+    <p class="subtitle">Kamera akan otomatis blur ketika tangan terdeteksi.</p>
+
+    <div class="camera-box">
+      <video id="video" autoplay muted playsinline></video>
+      <div class="overlay">
+        <div class="blur-label">✋ Tangan terdeteksi</div>
+      </div>
+    </div>
+
+    <div id="status">Tekan tombol untuk mengaktifkan kamera.</div>
+
+    <button id="startBtn">📷 Aktifkan Kamera</button>
+    <button id="switchBtn" disabled>🔄 Ganti Kamera</button>
+
+    <div class="hint">
+      Izinkan akses kamera ketika browser memintanya.<br>
+      Untuk Android, halaman harus dibuka melalui HTTPS atau localhost.
+    </div>
+  </main>
+
+  <script>
+    const video = document.getElementById("video");
+    const statusEl = document.getElementById("status");
+    const startBtn = document.getElementById("startBtn");
+    const switchBtn = document.getElementById("switchBtn");
+
+    let stream = null;
+    let cameraFacing = "user";
+    let running = false;
+    let detecting = false;
+
+    const hands = new Hands({
+      locateFile: (file) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+      }
+    });
+
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6
+    });
+
+    hands.onResults((results) => {
+      const handDetected =
+        results.multiHandLandmarks &&
+        results.multiHandLandmarks.length > 0;
+
+      if (handDetected) {
+        video.classList.add("blurred");
+        statusEl.textContent = "✋ Tangan/jari terdeteksi — kamera diblur";
+        statusEl.className = "ok";
+      } else {
+        video.classList.remove("blurred");
+        statusEl.textContent = "👀 Tidak ada tangan terdeteksi";
+        statusEl.className = "";
+      }
+
+      detecting = false;
+    });
+
+    async function startCamera() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        showError(
+          "Browser ini tidak mendukung kamera. Gunakan Chrome/Edge/Safari terbaru."
+        );
+        return;
+      }
+
+      if (!window.isSecureContext) {
+        showError(
+          "Kamera membutuhkan HTTPS atau localhost. Jangan buka file langsung dari Downloads."
+        );
+        return;
+      }
+
+      stopCamera();
+
+      try {
+        statusEl.textContent = "Meminta izin kamera...";
+        statusEl.className = "";
+
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: cameraFacing,
+            width: { ideal: 640 },
+            height: { ideal: 480 }
+          },
+          audio: false
+        });
+
+        video.srcObject = stream;
+        await video.play();
+
+        running = true;
+        startBtn.textContent = "⏹ Matikan Kamera";
+        switchBtn.disabled = false;
+
+        statusEl.textContent = "Kamera aktif — arahkan tangan ke kamera.";
+        statusEl.className = "ok";
+
+        detectLoop();
+      } catch (error) {
+        console.error(error);
+
+        if (error.name === "NotAllowedError" ||
+            error.name === "PermissionDeniedError") {
+          showError(
+            "Izin kamera ditolak. Buka izin kamera browser lalu coba lagi."
+          );
+        } else if (error.name === "NotFoundError") {
+          showError("Kamera tidak ditemukan pada perangkat.");
+        } else if (error.name === "NotReadableError") {
+          showError("Kamera sedang digunakan aplikasi lain.");
+        } else {
+          showError("Kamera gagal dibuka: " + error.name);
+        }
+      }
+    }
+
+    function stopCamera() {
+      running = false;
+
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
+      }
+
+      video.srcObject = null;
+      video.classList.remove("blurred");
+      switchBtn.disabled = true;
+      startBtn.textContent = "📷 Aktifkan Kamera";
+    }
+
+    async function detectLoop() {
+      if (!running) return;
+
+      if (
+        video.readyState >= 2 &&
+        !detecting
+      ) {
+        detecting = true;
+
+        try {
+          await hands.send({ image: video });
+        } catch (error) {
+          console.error("Deteksi error:", error);
+          detecting = false;
+        }
+      }
+
+      requestAnimationFrame(detectLoop);
+    }
+
+    startBtn.addEventListener("click", async () => {
+      if (running) {
+        stopCamera();
+        statusEl.textContent = "Kamera dimatikan.";
+        statusEl.className = "";
+      } else {
+        await startCamera();
+      }
+    });
+
+    switchBtn.addEventListener("click", async () => {
+      cameraFacing = cameraFacing === "user" ? "environment" : "user";
+      await startCamera();
+    });
+
+    function showError(message) {
+      statusEl.textContent = "⚠️ " + message;
+      statusEl.className = "error";
+      startBtn.textContent = "📷 Coba Lagi";
+    }
+
+    window.addEventListener("pagehide", stopCamera);
+  </script>
+</body>
+</html>
