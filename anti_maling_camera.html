@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Anti-Maling Camera Detector</title>
+  <style>
+    *{box-sizing:border-box}
+    body{margin:0;background:#0b1020;color:#eef2ff;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+    .wrap{max-width:1100px;margin:auto;padding:24px}
+    h1{margin:0 0 6px;font-size:28px}.sub{color:#aab4d0;margin:0 0 20px}
+    .grid{display:grid;grid-template-columns:2fr 1fr;gap:18px}
+    .card{background:#121a2f;border:1px solid #263252;border-radius:18px;padding:16px;box-shadow:0 12px 35px #0004}
+    .stage{position:relative;width:100%;aspect-ratio:16/9;background:#050812;border-radius:14px;overflow:hidden}
+    video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+    canvas{pointer-events:none}
+    .status{position:absolute;left:14px;top:14px;padding:8px 12px;border-radius:999px;background:#18233e;color:#dbe7ff;font-weight:700}
+    .warning{position:absolute;inset:0;display:none;place-items:center;background:#d71920aa;animation:blink .8s infinite}
+    .warning.show{display:grid}.warning div{font-size:clamp(28px,5vw,64px);font-weight:900;text-align:center;text-shadow:0 3px 12px #000}
+    @keyframes blink{50%{background:#d7192066}}
+    label{display:block;margin:14px 0 7px;color:#c8d2ec;font-size:14px}
+    input[type=range]{width:100%}
+    button{border:0;border-radius:11px;padding:11px 15px;font-weight:800;cursor:pointer}
+    .primary{background:#6ea8fe;color:#08111f}.danger{background:#ef4444;color:white}
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    .metric{padding:12px;border-radius:12px;background:#0c1326;margin-top:10px}
+    .metric b{font-size:22px}.hint{font-size:13px;line-height:1.5;color:#aeb8d2}
+    .ok{color:#73e6a2}.bad{color:#ff8585}
+    @media(max-width:800px){.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🛡️ Anti-Maling Camera Detector</h1>
+  <p class="sub">Deteksi tangan yang mendekati area barang dan tampilkan peringatan + jarak relatif.</p>
+
+  <div class="grid">
+    <section class="card">
+      <div class="stage" id="stage">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="overlay"></canvas>
+        <div class="status" id="cameraStatus">Kamera belum aktif</div>
+        <div class="warning" id="warning"><div>⚠️ WARNING<br>JANGAN AMBIL BARANG!</div></div>
+      </div>
+    </section>
+
+    <aside class="card">
+      <div class="row">
+        <button class="primary" id="start">Aktifkan Kamera</button>
+        <button class="danger" id="stop">Matikan</button>
+      </div>
+
+      <label>Ukuran area barang: <span id="sizeText">30%</span></label>
+      <input id="size" type="range" min="10" max="60" value="30">
+
+      <label>Jarak warning: <span id="thresholdText">15%</span></label>
+      <input id="threshold" type="range" min="3" max="40" value="15">
+
+      <div class="metric">
+        Status: <b id="alarmText" class="ok">AMAN</b>
+      </div>
+      <div class="metric">
+        Jarak relatif: <b id="distanceText">—</b>
+      </div>
+      <div class="metric">
+        Tangan terdeteksi: <b id="handsText">0</b>
+      </div>
+
+      <p class="hint">
+        <b>Cara pakai:</b> letakkan barang di tengah gambar. Kotak biru adalah area barang.
+        Jika titik tangan masuk/terlalu dekat dengan kotak, alarm aktif.
+        Jarak yang ditampilkan adalah <b>jarak relatif</b> berdasarkan ukuran gambar,
+        bukan ukuran centimeter nyata.
+      </p>
+      <p class="hint">
+        Untuk jarak cm yang lebih akurat, kamera perlu dikalibrasi berdasarkan posisi kamera
+        dan ukuran benda.
+      </p>
+    </aside>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('overlay');
+const ctx = canvas.getContext('2d');
+const warning = document.getElementById('warning');
+const cameraStatus = document.getElementById('cameraStatus');
+const alarmText = document.getElementById('alarmText');
+const distanceText = document.getElementById('distanceText');
+const handsText = document.getElementById('handsText');
+const size = document.getElementById('size');
+const threshold = document.getElementById('threshold');
+const sizeText = document.getElementById('sizeText');
+const thresholdText = document.getElementById('thresholdText');
+
+let stream = null;
+let camera = null;
+let lastAlarm = false;
+
+function updateLabels(){
+  sizeText.textContent = size.value + '%';
+  thresholdText.textContent = threshold.value + '%';
+}
+size.addEventListener('input', updateLabels);
+threshold.addEventListener('input', updateLabels);
+updateLabels();
+
+function setupCanvas(){
+  const w = video.videoWidth || 1280;
+  const h = video.videoHeight || 720;
+  canvas.width = w; canvas.height = h;
+}
+
+function itemBox(){
+  const s = Number(size.value) / 100;
+  const w = canvas.width, h = canvas.height;
+  const bw = w*s, bh = h*s;
+  return {x:(w-bw)/2,y:(h-bh)/2,w:bw,h:bh};
+}
+
+function centerOfLandmarks(lm){
+  let x=0,y=0;
+  for(const p of lm){x+=p.x;y+=p.y}
+  return {x:x/lm.length,y:y/lm.length};
+}
+
+function pointToBoxDistance(px,py,b){
+  const cx=Math.max(b.x,Math.min(px,b.x+b.w));
+  const cy=Math.max(b.y,Math.min(py,b.y+b.h));
+  return Math.hypot(px-cx,py-cy);
+}
+
+function setAlarm(on){
+  if(on===lastAlarm) return;
+  lastAlarm=on;
+  warning.classList.toggle('show',on);
+  alarmText.textContent=on?'WARNING':'AMAN';
+  alarmText.className=on?'bad':'ok';
+  if(on && navigator.vibrate) navigator.vibrate([200,100,200]);
+}
+
+const hands = new Hands({
+  locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+});
+hands.setOptions({
+  maxNumHands: 2,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.6,
+  minTrackingConfidence: 0.6
+});
+
+hands.onResults(results => {
+  setupCanvas();
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  const b=itemBox();
+  ctx.strokeStyle='#5da9ff';
+  ctx.lineWidth=Math.max(3,canvas.width/400);
+  ctx.strokeRect(b.x,b.y,b.w,b.h);
+  ctx.fillStyle='#5da9ff';
+  ctx.font=`${Math.max(16,canvas.width/55)}px system-ui`;
+  ctx.fillText('BARANG',b.x+10,b.y+28);
+
+  let nearest=Infinity;
+  let count=0;
+
+  if(results.multiHandLandmarks){
+    count=results.multiHandLandmarks.length;
+    for(const lm of results.multiHandLandmarks){
+      drawConnectors(ctx,lm,HAND_CONNECTIONS,{color:'#00e676',lineWidth:4});
+      drawLandmarks(ctx,lm,{color:'#ffffff',lineWidth:1,radius:4});
+
+      const c=centerOfLandmarks(lm);
+      const px=c.x*canvas.width, py=c.y*canvas.height;
+      const d=pointToBoxDistance(px,py,b);
+      nearest=Math.min(nearest,d);
+
+      ctx.beginPath();
+      ctx.arc(px,py,12,0,Math.PI*2);
+      ctx.fillStyle='#ffcc00';
+      ctx.fill();
+
+      ctx.fillStyle='#ffffff';
+      ctx.font=`${Math.max(14,canvas.width/70)}px system-ui`;
+      ctx.fillText(`${Math.round(d)} px`,px+15,py-10);
+    }
+  }
+
+  handsText.textContent=count;
+  if(nearest===Infinity){
+    distanceText.textContent='—';
+    setAlarm(false);
+  }else{
+    const relative=(nearest/Math.min(canvas.width,canvas.height))*100;
+    distanceText.textContent=relative.toFixed(1)+'%';
+    setAlarm(relative <= Number(threshold.value));
+  }
+});
+
+async function startCamera(){
+  try{
+    if(stream) stopCamera();
+    stream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:'environment',width:{ideal:1280},height:{ideal:720}},
+      audio:false
+    });
+    video.srcObject=stream;
+    await video.play();
+    cameraStatus.textContent='Kamera aktif';
+    cameraStatus.style.background='#123b28';
+    cameraStatus.style.color='#8df0b2';
+
+    camera=new Camera(video,{
+      onFrame:async()=>{ await hands.send({image:video}); },
+      width:1280,height:720
+    });
+    camera.start();
+  }catch(err){
+    cameraStatus.textContent='Gagal: '+err.name;
+    alert('Kamera tidak bisa diakses. Izinkan permission kamera dan buka halaman lewat HTTPS atau localhost.');
+  }
+}
+
+function stopCamera(){
+  if(camera){camera.stop();camera=null}
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
+  video.srcObject=null;
+  setAlarm(false);
+  handsText.textContent='0';
+  distanceText.textContent='—';
+  cameraStatus.textContent='Kamera belum aktif';
+  cameraStatus.style.background='#18233e';
+  cameraStatus.style.color='#dbe7ff';
+}
+
+document.getElementById('start').onclick=startCamera;
+document.getElementById('stop').onclick=stopCamera;
+window.addEventListener('beforeunload',stopCamera);
+</script>
+</body>
+</html>
